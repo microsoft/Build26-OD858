@@ -1,0 +1,10 @@
+{
+    "name": "zen-coding",
+    "wallpaper_search": "zen garden stones calm minimal dark",
+    "accent_color": "#5B8A72",
+    "mode": "dark",
+    "taskbar_accent": false,
+    "transparency": true,
+    "dl_palette": ["#5B8A72", "#3D5A4C", "#2C3E35", "#8FB5A1", "#1A2820"],
+    "dl_style": "breathe"
+}

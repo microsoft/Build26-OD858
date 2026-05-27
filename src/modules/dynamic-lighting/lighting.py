@@ -1,0 +1,296 @@
+"""
+Dynamic Lighting CLI
+====================
+Command-line interface for controlling Dynamic Lighting devices.
+Communicates with the C# DynamicLightingDriver.exe via a simple line protocol over stdio.
+
+Usage:
+    python lighting.py set-color <color>
+    python lighting.py set-per-lamp '<json>'
+    python lighting.py list-devices
+    python lighting.py list-effects
+    python lighting.py run-effect <name>
+    python lighting.py stop
+    python lighting.py diagnose
+"""
+
+import os
+import sys
+import json
+import time
+import subprocess
+import threading
+import argparse
+import signal
+
+EXE = os.path.join(
+    os.environ.get('LOCALAPPDATA', os.path.join(os.path.expanduser('~'), 'AppData', 'Local')),
+    'DynamicLightingDriver', 'DynamicLightingDriver.exe'
+)
+
+EFFECTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'effects')
+
+
+# ---------------------------------------------------------------------------
+# Line protocol helpers
+# ---------------------------------------------------------------------------
+
+def launch_driver():
+    """Launch the C# DynamicLightingDriver.exe and return the subprocess."""
+    if not os.path.isfile(EXE):
+        print(f"Error: Driver exe not found at {EXE}", file=sys.stderr)
+        print("Build it first: dotnet build modules/dynamic-lighting/DynamicLightingDriver.sln", file=sys.stderr)
+        sys.exit(1)
+    proc = subprocess.Popen(
+        [EXE],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+    # Drain stderr in background to prevent blocking
+    threading.Thread(
+        target=lambda: [proc.stderr.readline() for _ in iter(int, 1)],
+        daemon=True,
+    ).start()
+    return proc
+
+
+def send(proc, cmd):
+    """Send a line command to the driver."""
+    try:
+        proc.stdin.write((cmd + '\n').encode())
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError):
+        pass
+
+
+def recv(proc):
+    """Read a line response from the driver."""
+    try:
+        line = proc.stdout.readline()
+        if not line:
+            return None
+        return line.decode().strip()
+    except (OSError, ValueError):
+        return None
+
+
+def wait_ready(proc):
+    """Wait for the driver READY signal."""
+    ready = recv(proc)
+    if ready != 'READY':
+        print(f"Error: Driver not ready: {ready}", file=sys.stderr)
+        sys.exit(1)
+
+
+def print_response(resp):
+    """Print the response from the driver."""
+    if resp is None:
+        print("No response from driver.")
+        return
+    if resp.startswith('OK '):
+        print(resp[3:])
+    elif resp.startswith('ERROR '):
+        print(resp[6:], file=sys.stderr)
+    else:
+        print(resp)
+
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_set_color(args):
+    proc = launch_driver()
+    try:
+        wait_ready(proc)
+        send(proc, f'SET_ALL {args.color}')
+        resp = recv(proc)
+        print_response(resp)
+    finally:
+        proc.terminate()
+
+
+def cmd_set_per_lamp(args):
+    proc = launch_driver()
+    try:
+        wait_ready(proc)
+        send(proc, f'SET_LAMPS {args.json_str}')
+        resp = recv(proc)
+        print_response(resp)
+    finally:
+        proc.terminate()
+
+
+def cmd_list_devices(args):
+    proc = launch_driver()
+    try:
+        wait_ready(proc)
+        send(proc, 'LIST_DEVICES')
+        resp = recv(proc)
+        print_response(resp)
+    finally:
+        proc.terminate()
+
+
+def cmd_diagnose(args):
+    proc = launch_driver()
+    try:
+        wait_ready(proc)
+        send(proc, 'DIAGNOSE')
+        resp = recv(proc)
+        print_response(resp)
+    finally:
+        proc.terminate()
+
+
+def cmd_list_effects(args):
+    if not os.path.isdir(EFFECTS_DIR):
+        print(f"Effects directory not found: {EFFECTS_DIR}", file=sys.stderr)
+        sys.exit(1)
+    effects = []
+    for f in sorted(os.listdir(EFFECTS_DIR)):
+        if f.endswith('.py') and f != '_template.py' and not f.startswith('_'):
+            name = f[:-3]  # strip .py
+            effects.append(name)
+    if effects:
+        print("Available effects:")
+        for name in effects:
+            print(f"  - {name}")
+    else:
+        print("No effects found.")
+
+
+def cmd_run_effect(args):
+    name = args.name
+    if not name.endswith('.py'):
+        name = name + '.py'
+    script = os.path.join(EFFECTS_DIR, name)
+    if not os.path.isfile(script):
+        print(f"Effect not found: {script}", file=sys.stderr)
+        print("Run 'python lighting.py list-effects' to see available effects.", file=sys.stderr)
+        sys.exit(1)
+    # Stop any existing effect processes before starting a new one
+    _stop_existing_effects()
+    # Use CREATE_NEW_PROCESS_GROUP so the effect survives if this CLI exits
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP
+    env = os.environ.copy()
+    if getattr(args, 'minimized', False):
+        env['DL_MINIMIZED'] = '1'
+    p = subprocess.Popen([sys.executable, script], creationflags=flags, env=env)
+    print(f"Started effect '{args.name}' (PID {p.pid})")
+    print("Press Ctrl+C to detach (effect keeps running).")
+    try:
+        p.wait()
+    except KeyboardInterrupt:
+        print(f"\nDetached. Effect still running (PID {p.pid}). Use 'lighting.py stop' to end it.")
+
+
+def cmd_set_theme(args):
+    proc = launch_driver()
+    try:
+        wait_ready(proc)
+        send(proc, f'SET_THEME {args.mode}')
+        resp = recv(proc)
+        print_response(resp)
+    finally:
+        proc.terminate()
+
+
+def _stop_existing_effects():
+    """Find and kill Python processes running effect scripts. Returns list of killed PIDs."""
+    killed = []
+    try:
+        result = subprocess.run(
+            ['powershell', '-NoProfile', '-Command',
+             "Get-CimInstance Win32_Process -Filter \"Name like '%python%'\" "
+             "| Select-Object ProcessId, CommandLine "
+             "| ConvertTo-Json -Compress"],
+            capture_output=True, text=True, timeout=10,
+        )
+        current_pid = os.getpid()
+        effects_norm = os.path.normpath(EFFECTS_DIR).lower()
+        import json as _json
+        data = _json.loads(result.stdout) if result.stdout.strip() else []
+        if isinstance(data, dict):
+            data = [data]
+        for proc in data:
+            pid = proc.get('ProcessId')
+            cmdline = proc.get('CommandLine') or ''
+            if (pid and pid != current_pid
+                    and effects_norm in os.path.normpath(cmdline).lower()
+                    and cmdline.rstrip().endswith('.py')):
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    killed.append(pid)
+                except OSError:
+                    pass
+    except Exception as e:
+        print(f"Error scanning processes: {e}", file=sys.stderr)
+    return killed
+
+
+def cmd_stop(args):
+    """Find and kill Python processes running effect scripts."""
+    killed = _stop_existing_effects()
+    if killed:
+        print(f"Stopped {len(killed)} effect process(es): {killed}")
+    else:
+        print("No running effect processes found.")
+
+
+# ---------------------------------------------------------------------------
+# CLI parser
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='lighting.py',
+        description='CLI for controlling Dynamic Lighting devices.',
+    )
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    # set-color
+    p_color = sub.add_parser('set-color', help='Set all lamps to a single color (hex or name)')
+    p_color.add_argument('color', help='Color value, e.g. "#FF0000" or "red"')
+    p_color.set_defaults(func=cmd_set_color)
+
+    # set-per-lamp
+    p_per = sub.add_parser('set-per-lamp', help='Set individual lamp colors via JSON')
+    p_per.add_argument('json_str', help='JSON map of lamp index to hex color, e.g. \'{"0":"#FF0000"}\'')
+    p_per.set_defaults(func=cmd_set_per_lamp)
+
+    # list-devices
+    p_dev = sub.add_parser('list-devices', help='List connected Dynamic Lighting devices')
+    p_dev.set_defaults(func=cmd_list_devices)
+
+    # list-effects
+    p_eff = sub.add_parser('list-effects', help='List available effect scripts')
+    p_eff.set_defaults(func=cmd_list_effects)
+
+    # run-effect
+    p_run = sub.add_parser('run-effect', help='Run a named effect (e.g. koi-fish)')
+    p_run.add_argument('name', help='Effect name (auto-adds .py)')
+    p_run.add_argument('--minimized', action='store_true', help='Start with driver hidden to system tray')
+    p_run.set_defaults(func=cmd_run_effect)
+
+    # stop
+    p_stop = sub.add_parser('stop', help='Stop running effect processes')
+    p_stop.set_defaults(func=cmd_stop)
+
+    # set-theme
+    p_theme = sub.add_parser('set-theme', help='Switch the driver window between light and dark mode')
+    p_theme.add_argument('mode', choices=['light', 'dark'], help='Theme mode')
+    p_theme.set_defaults(func=cmd_set_theme)
+
+    # diagnose
+    p_diag = sub.add_parser('diagnose', help='Run device diagnostics')
+    p_diag.set_defaults(func=cmd_diagnose)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == '__main__':
+    main()

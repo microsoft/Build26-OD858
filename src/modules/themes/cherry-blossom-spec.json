@@ -1,0 +1,10 @@
+{
+    "name": "cherry-blossom",
+    "wallpaper_search": "cherry blossom sakura pink spring japan",
+    "accent_color": "#E8A0BF",
+    "mode": "light",
+    "taskbar_accent": false,
+    "transparency": true,
+    "dl_palette": ["#E8A0BF", "#F5D0E0", "#FFB7C5", "#C77DA3", "#FCEEF5"],
+    "dl_style": "shimmer"
+}

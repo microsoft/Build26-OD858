@@ -1,0 +1,45 @@
+# Build output
+bin/
+obj/
+*.msix
+!modules/themes/library/packages/*.msix
+
+# Theme library cache (extracted deskthemepacks)
+modules/themes/library/.cache/
+
+# IDE
+.vs/
+*.user
+*.suo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+stderr.log
+
+# Dependencies
+node_modules/
+
+# Certificates & secrets
+*.pfx
+devcert.pfx
+.spotify-token
+.spotify-config
+
+# Runtime files
+*.pid
+.theme-lighting.pid
+
+# Staged binaries
+PackageStaging/DynamicLightingDriver.exe
+
+# Legacy skill directory (skill now lives at repo root)
+.github/skills/

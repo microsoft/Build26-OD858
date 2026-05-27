@@ -1,0 +1,26 @@
+# Internal-only materials (removed before publish)
+_remove-before-publish/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+
+# IDE
+.vs/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
